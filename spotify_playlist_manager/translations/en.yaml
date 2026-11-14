@@ -28,6 +28,7 @@ configuration:
       Each entry needs 'playlist' plus either 'order_file' (a CSV in the orders folder with a
       'Track ID' column) or 'sort_by' (name, artist, album, added_at, release_date, duration).
       Optional 'reverse: true'. Sorted playlists are always backed up first.
+      Easier: use the 'sort & overrides' page in the web UI, which takes priority over this list.
   dry_run:
     name: Dry run
     description: Work out the sort moves and log them, without changing any playlist.

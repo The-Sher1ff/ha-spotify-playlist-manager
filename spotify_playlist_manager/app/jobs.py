@@ -27,39 +27,68 @@ def is_running() -> bool:
     return _lock.locked()
 
 
-def run_job(trigger: str, sp_factory=spotify.client) -> dict | None:
+def sort_rules(opts: dict, db: DB) -> dict[str, dict]:
+    """Playlist id -> sort rule. Settings saved in the web UI win over the add-on config."""
+    rules = {}
+    for r in opts["sort_playlists"]:
+        rules[spotify.parse_playlist_id(r["playlist"])] = {**r, "source": "config"}
+    for s in db.all_sort_settings():
+        if s["enabled"]:
+            rules[s["playlist_id"]] = rule_from_settings(s)
+        else:  # turned off in the UI, even if the config lists it
+            rules.pop(s["playlist_id"], None)
+    return rules
+
+
+def rule_from_settings(s: dict) -> dict:
+    rule = {"reverse": bool(s["reverse"]), "keep_original_dates": bool(s["keep_original_dates"]),
+            "source": "web"}
+    if s["sort_by"] == "custom":
+        rule["order_file"] = f"{s['playlist_id']}.csv"
+    else:
+        rule["sort_by"] = s["sort_by"]
+    return rule
+
+
+def run_job(trigger: str, sp_factory=spotify.client, only: str | None = None) -> dict | None:
+    """Run everything, or with `only` just back up and sort that one playlist."""
     if not _lock.acquire(blocking=False):
         log.info("Run already in progress; ignoring %s trigger", trigger)
         return None
     try:
-        return _run(trigger, sp_factory)
+        return _run(trigger, sp_factory, only)
     finally:
         _lock.release()
 
 
-def _run(trigger: str, sp_factory) -> dict:
+def _run(trigger: str, sp_factory, only: str | None) -> dict:
     opts = load_options()
     ddir = data_dir(opts)
     db = open_db(opts)
     run_id = db.start_run(trigger, now_iso())
     errors, backed_up, sorted_ = [], [], []
-    log.info("Run started (%s)", trigger)
+    log.info("Run started (%s%s)", trigger, f", playlist {only}" if only else "")
 
     try:
         if sp_factory is spotify.client and not spotify.is_authorized(opts):
             raise RuntimeError("Spotify is not connected. Open the add-on web UI and click 'Connect Spotify'.")
         sp = sp_factory(opts)
+        rules = sort_rules(opts, db)
 
         targets: dict[str, None] = {}  # ordered set
-        for p in opts["backup_playlists"]:
-            targets[spotify.parse_playlist_id(p)] = None
-        for rule in opts["sort_playlists"]:  # always back up before re-ordering
-            targets[spotify.parse_playlist_id(rule["playlist"])] = None
-        if opts["backup_all_my_playlists"]:
-            for p in sp.my_playlists():
-                targets[p["id"]] = None
-        if opts["backup_liked_songs"]:
-            targets[spotify.LIKED_SONGS] = None
+        if only:
+            targets[only] = None
+            rules = {only: rules[only]} if only in rules else {}
+        else:
+            for p in opts["backup_playlists"]:
+                targets[spotify.parse_playlist_id(p)] = None
+            if opts["backup_all_my_playlists"]:
+                for p in sp.my_playlists():
+                    targets[p["id"]] = None
+            if opts["backup_liked_songs"]:
+                targets[spotify.LIKED_SONGS] = None
+        for pid in rules:  # always back up before re-ordering
+            targets[pid] = None
 
         for pid in targets:
             try:
@@ -68,8 +97,7 @@ def _run(trigger: str, sp_factory) -> dict:
                 log.exception("Backup failed for %s", pid)
                 errors.append(f"backup {pid}: {e}")
 
-        for rule in opts["sort_playlists"]:
-            pid = spotify.parse_playlist_id(rule["playlist"])
+        for pid, rule in rules.items():
             if pid == spotify.LIKED_SONGS:
                 errors.append("Liked Songs can't be re-ordered through the Spotify API")
                 continue
@@ -77,7 +105,11 @@ def _run(trigger: str, sp_factory) -> dict:
                 errors.append(f"sort {pid}: skipped because its backup failed")
                 continue
             try:
-                sorted_.append(sort_playlist(sp, pid, rule, ddir / "orders", opts["dry_run"]))
+                result = sort_playlist(sp, pid, rule, ddir / "orders", opts["dry_run"],
+                                       db.history(pid), db.overrides(pid))
+                sorted_.append(result)
+                if result["moves"] and not result["dry_run"]:
+                    backup_playlist(sp, db, ddir, pid, now_iso())  # record the new order
             except Exception as e:  # noqa: BLE001
                 log.exception("Sort failed for %s", pid)
                 errors.append(f"sort {pid}: {e}")

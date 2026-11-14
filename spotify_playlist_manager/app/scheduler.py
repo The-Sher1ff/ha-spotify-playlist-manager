@@ -26,7 +26,7 @@ class Scheduler:
         self.cron = cron
         self.next_run: datetime | None = None
         self._wake = threading.Event()
-        self._pending_trigger: str | None = None
+        self._pending: tuple[str, str | None] | None = None
         self.heartbeat: datetime | None = None  # last time the loop ticked; used by /health
 
     def healthy(self) -> bool:
@@ -35,8 +35,9 @@ class Scheduler:
         return self.heartbeat is not None and \
             (datetime.now().astimezone() - self.heartbeat).total_seconds() < 3 * STATUS_INTERVAL
 
-    def trigger(self, source: str):
-        self._pending_trigger = source
+    def trigger(self, source: str, only: str | None = None):
+        """Queue a run. `only` = a single playlist id (back up + sort just that one)."""
+        self._pending = (source, only)
         self._wake.set()
 
     def _compute_next(self):
@@ -48,10 +49,10 @@ class Scheduler:
         except Exception as e:  # noqa: BLE001
             log.warning("Could not publish status: %s", e)
 
-    def _run(self, trigger: str):
+    def _run(self, trigger: str, only: str | None = None):
         self.publish_status(running=True)
         try:
-            jobs.run_job(trigger)
+            jobs.run_job(trigger, only=only)
         finally:
             self.publish_status()
 
@@ -61,10 +62,10 @@ class Scheduler:
         self.publish_status()
         while True:
             self.heartbeat = datetime.now().astimezone()
-            timeout =max(0.0, (self.next_run - datetime.now().astimezone()).total_seconds())
+            timeout = max(0.0, (self.next_run - datetime.now().astimezone()).total_seconds())
             if self._wake.wait(timeout=min(timeout, STATUS_INTERVAL)):
                 self._wake.clear()
-                self._run(self._pending_trigger or "manual")
+                self._run(*(self._pending or ("manual", None)))
             elif datetime.now().astimezone() >= self.next_run:
                 self._compute_next()  # before the run, so the sensor shows the following run
                 self._run("schedule")

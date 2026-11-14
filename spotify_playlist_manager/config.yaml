@@ -1,5 +1,5 @@
 name: Spotify Playlist Manager
-version: "1.1.0"
+version: "1.2.0"
 slug: spotify_playlist_manager
 description: Scheduled backup (CSV + SQLite) and re-ordering of Spotify playlists
 url: https://github.com/The-Sher1ff/ha-spotify-playlist-manager

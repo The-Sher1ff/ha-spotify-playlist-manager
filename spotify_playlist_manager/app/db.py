@@ -56,6 +56,39 @@ JOIN (SELECT playlist_id, MAX(backup_id) AS backup_id FROM backups GROUP BY play
 JOIN playlists p ON p.playlist_id = b.playlist_id
 JOIN backup_items bi ON bi.backup_id = b.backup_id
 JOIN tracks t ON t.track_key = bi.track_key;
+
+-- Sort settings made in the web UI (take precedence over sort_playlists in the add-on config).
+CREATE TABLE IF NOT EXISTS sort_settings (
+    playlist_id          TEXT PRIMARY KEY,
+    enabled              INTEGER NOT NULL DEFAULT 0,
+    sort_by              TEXT NOT NULL DEFAULT 'added_at',   -- or 'custom' = uploaded order CSV
+    reverse              INTEGER NOT NULL DEFAULT 1,
+    keep_original_dates  INTEGER NOT NULL DEFAULT 1
+);
+-- Per-song overrides. Matched by track id, ISRC or normalised title+artist,
+-- so they survive a song being re-added under a different track id.
+CREATE TABLE IF NOT EXISTS overrides (
+    override_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id    TEXT NOT NULL,
+    track_id       TEXT,
+    isrc           TEXT,
+    song_key       TEXT,
+    name           TEXT,
+    artists        TEXT,
+    override_date  TEXT,     -- ISO date; used instead of the date added
+    pin            INTEGER,  -- 1-based position from the top
+    updated_at     TEXT
+);
+-- Old exports uploaded through the UI, used only to find original "date added" values.
+CREATE TABLE IF NOT EXISTS imported_history (
+    playlist_id  TEXT NOT NULL,
+    track_id     TEXT,
+    isrc         TEXT,
+    name         TEXT,
+    artists      TEXT,
+    added_at     TEXT,
+    source       TEXT
+);
 """
 
 
@@ -138,6 +171,73 @@ class DB:
         with self.conn() as c:
             return c.execute("SELECT b.*, p.name FROM backups b JOIN playlists p USING(playlist_id) "
                              "WHERE backup_id=?", (backup_id,)).fetchone()
+
+    def playlist(self, playlist_id: str) -> sqlite3.Row | None:
+        with self.conn() as c:
+            return c.execute("SELECT * FROM playlists WHERE playlist_id=?", (playlist_id,)).fetchone()
+
+    # --- sorting -----------------------------------------------------------
+    def sort_settings(self, playlist_id: str) -> dict | None:
+        with self.conn() as c:
+            r = c.execute("SELECT * FROM sort_settings WHERE playlist_id=?", (playlist_id,)).fetchone()
+            return dict(r) if r else None
+
+    def all_sort_settings(self) -> list[dict]:
+        with self.conn() as c:
+            return [dict(r) for r in c.execute("SELECT * FROM sort_settings")]
+
+    def save_sort_settings(self, playlist_id: str, enabled: bool, sort_by: str, reverse: bool,
+                           keep_original_dates: bool):
+        with self.conn() as c:
+            c.execute(
+                "INSERT INTO sort_settings(playlist_id,enabled,sort_by,reverse,keep_original_dates) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(playlist_id) DO UPDATE SET enabled=excluded.enabled, "
+                "sort_by=excluded.sort_by, reverse=excluded.reverse, "
+                "keep_original_dates=excluded.keep_original_dates",
+                (playlist_id, int(enabled), sort_by, int(reverse), int(keep_original_dates)))
+
+    def overrides(self, playlist_id: str) -> list[dict]:
+        with self.conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT * FROM overrides WHERE playlist_id=? ORDER BY override_id", (playlist_id,))]
+
+    def save_override(self, playlist_id: str, override_id: int | None, ident: dict,
+                      override_date: str | None, pin: int | None, now: str):
+        with self.conn() as c:
+            if override_id:
+                if not override_date and not pin:
+                    c.execute("DELETE FROM overrides WHERE override_id=? AND playlist_id=?",
+                              (override_id, playlist_id))
+                else:
+                    c.execute("UPDATE overrides SET override_date=?, pin=?, updated_at=?, track_id=?, isrc=?, "
+                              "song_key=?, name=?, artists=? WHERE override_id=? AND playlist_id=?",
+                              (override_date, pin, now, ident["track_id"], ident["isrc"], ident["song_key"],
+                               ident["name"], ident["artists"], override_id, playlist_id))
+            elif override_date or pin:
+                c.execute("INSERT INTO overrides(playlist_id,track_id,isrc,song_key,name,artists,override_date,"
+                          "pin,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                          (playlist_id, ident["track_id"], ident["isrc"], ident["song_key"], ident["name"],
+                           ident["artists"], override_date, pin, now))
+
+    def history(self, playlist_id: str) -> list[dict]:
+        """Every (track, date added) this playlist has ever had, from backups and imports."""
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT t.track_id, t.isrc, t.name, t.artists, MIN(bi.added_at) AS added_at "
+                "FROM backups b JOIN backup_items bi USING(backup_id) JOIN tracks t USING(track_key) "
+                "WHERE b.playlist_id=? AND bi.added_at != '' GROUP BY t.track_key "
+                "UNION ALL SELECT track_id, isrc, name, artists, added_at FROM imported_history "
+                "WHERE playlist_id=? AND added_at != ''", (playlist_id, playlist_id)).fetchall()
+            return [dict(r) for r in rows]
+
+    def import_history(self, playlist_id: str, rows: list[dict], source: str) -> int:
+        with self.conn() as c:
+            c.executemany(
+                "INSERT INTO imported_history(playlist_id,track_id,isrc,name,artists,added_at,source) "
+                "VALUES(?,?,?,?,?,?,?)",
+                [(playlist_id, r.get("track_id"), r.get("isrc"), r.get("name"), r.get("artists"),
+                  r.get("added_at"), source) for r in rows])
+            return len(rows)
 
     # --- runs --------------------------------------------------------------
     def start_run(self, trigger: str, started_at: str) -> int:

@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from flask import Flask, Response, abort, redirect, render_template_string, request, send_file
 
-from . import jobs, spotify
+from . import jobs, sortpage, spotify
 from .backup import csv_bytes, safe_name
 from .config import data_dir, load_options
 
@@ -103,7 +103,7 @@ def create_app(sched):
         if not backups:
             abort(404)
         name = db.backup(backups[0]["backup_id"])["name"]
-        return page(HISTORY, name=name, backups=backups,
+        return page(HISTORY, name=name, backups=backups, pid=pid,
                     rows=db.backup_rows(backups[0]["backup_id"]))
 
     @app.get("/backup/<int:backup_id>.csv")
@@ -138,6 +138,8 @@ def create_app(sched):
         return send_file(buf, mimetype="application/zip", as_attachment=True,
                          download_name=f"spotify_export_{stamp}.zip")
 
+    sortpage.register(app, sched, page, base)
+
     @app.get("/status.json")
     def status():
         opts = load_options()
@@ -170,7 +172,8 @@ INDEX = """
   {% for p in playlists %}<tr>
     <td><a href="{{base}}/playlist/{{p.playlist_id}}">{{ p.name }}</a></td><td>{{ p.track_count }}</td>
     <td>{{ p.versions }}</td><td class="muted">{{ p.last_backup[:16].replace('T',' ') }} UTC</td>
-    <td><a href="{{base}}/playlist/{{p.playlist_id}}">history</a></td></tr>{% endfor %}
+    <td><a href="{{base}}/playlist/{{p.playlist_id}}/sort">sort &amp; overrides</a> ·
+      <a href="{{base}}/playlist/{{p.playlist_id}}">history</a></td></tr>{% endfor %}
   </table>{% else %}<p class="muted">Nothing backed up yet. Add playlists in the add-on Configuration tab, then Run now.</p>{% endif %}
   <p class="muted">Files are also in <code>{{ data_dir }}</code>, which is the <code>share</code> folder over Samba / File editor.</p>
 </div>
@@ -205,6 +208,7 @@ CONNECT = """
 HISTORY = """
 <p><a href="{{base}}/">← All playlists</a></p>
 <h1>{{ name }}</h1>
+<p><a class="btn alt" href="{{base}}/playlist/{{pid}}/sort">Sort &amp; overrides</a></p>
 <div class="card"><h2>Versions</h2>
 <p class="muted">A new version is saved only when the playlist changed. Any version's CSV can be used as an
 <code>order_file</code> to put the playlist back in that order.</p>

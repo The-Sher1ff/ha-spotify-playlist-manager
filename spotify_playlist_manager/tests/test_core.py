@@ -202,7 +202,7 @@ def test_status_sensor_published(env, monkeypatch):
     fake = FakeSpotify({pid: {"name": "S", "items": [make_item("A" * 22, "a", "x", "2020")]}})
     monkeypatch.setattr(jobs.spotify, "client", lambda o: fake)
     monkeypatch.setattr(jobs.spotify, "is_authorized", lambda o: True)
-    monkeypatch.setattr(jobs, "run_job", lambda t, _orig=jobs.run_job: _orig(t, sp_factory=lambda o: fake))
+    monkeypatch.setattr(jobs, "run_job", lambda t, only=None, _orig=jobs.run_job: _orig(t, sp_factory=lambda o: fake, only=only))
 
     s = Scheduler("0 3 * * *")
     s._compute_next()
@@ -242,3 +242,117 @@ def test_health_endpoint(env, monkeypatch):
     assert c.get("/health").status_code == 200
     s.heartbeat -= timedelta(hours=1)
     assert c.get("/health").status_code == 503
+
+
+# --- sort settings, re-added songs, overrides ------------------------------------------
+
+def _names(fake, pid):
+    return [i["item"]["name"] for i in fake.playlists[pid]["items"]]
+
+
+def test_song_key_normalisation():
+    from app.sorter import song_key
+    assert song_key("House On The Beach - Single Version", "Ocean Alley") == song_key("House On The Beach", "Ocean Alley")
+    assert song_key("DANCER (feat. Allday)", "POOLCLVB, Allday") == song_key("Dancer", "POOLCLVB")
+    assert song_key("Song", "Artist A") != song_key("Song", "Artist B")  # covers stay distinct
+
+
+def test_readded_song_keeps_original_date_and_overrides(env):
+    _, write = env
+    pid = "R" * 22
+    write(backup_playlists=[pid])
+    from app import jobs
+    a = make_item("A" * 22, "Alpha", "X", "2021-01-01T00:00:00Z", isrc="AAA")
+    b = make_item("B" * 22, "Bravo - 2019 Remaster", "Y", "2022-01-01T00:00:00Z", isrc="BBB")
+    c = make_item("C" * 22, "Charlie", "Z", "2023-01-01T00:00:00Z", isrc="CCC")
+    fake = FakeSpotify({pid: {"name": "Mix", "items": [a, b, c]}})
+    run = lambda: jobs.run_job("t", sp_factory=lambda o: fake)  # noqa: E731
+    run()
+    db = jobs.open_db(jobs.load_options())
+
+    # Bravo gets replaced by a new track id (different ISRC too) added in 2025.
+    b2 = make_item("D" * 22, "Bravo", "Y", "2025-06-01T00:00:00Z", isrc="DDD")
+    fake.playlists[pid]["items"] = [a, c, b2]
+    db.save_sort_settings(pid, True, "added_at", True, True)  # newest first, keep original dates
+    assert run()["status"] == "ok"
+    assert _names(fake, pid) == ["Charlie", "Bravo", "Alpha"]  # Bravo keeps its 2022 slot
+
+    db.save_sort_settings(pid, True, "added_at", True, False)  # without the history lookup
+    run()
+    assert _names(fake, pid) == ["Bravo", "Charlie", "Alpha"]
+
+    # Override: treat Alpha as added in 2026 -> top. Pin Bravo to position 3 (bottom).
+    ident = lambda n, ar, tid, isrc: {"track_id": tid, "isrc": isrc, "name": n, "artists": ar,  # noqa: E731
+                                      "song_key": __import__("app.sorter").sorter.song_key(n, ar)}
+    db.save_override(pid, None, ident("Alpha", "X", "A" * 22, "AAA"), "2026-01-01", None, "now")
+    db.save_override(pid, None, ident("Bravo", "Y", "D" * 22, "DDD"), None, 3, "now")
+    db.save_sort_settings(pid, True, "added_at", True, True)
+    run()
+    assert _names(fake, pid) == ["Alpha", "Charlie", "Bravo"]
+
+    # Bravo re-added again under yet another id: the pin still applies (matched by title+artist).
+    b3 = make_item("E" * 22, "Bravo", "Y", "2026-02-01T00:00:00Z", isrc="EEE")
+    fake.playlists[pid]["items"] = [b3] + [i for i in fake.playlists[pid]["items"] if i["item"]["name"] != "Bravo"]
+    run()
+    assert _names(fake, pid) == ["Alpha", "Charlie", "Bravo"]
+
+    # Turning sorting off in the UI also stops a sort listed in the add-on config.
+    write(backup_playlists=[pid], sort_playlists=[{"playlist": pid, "sort_by": "name"}])
+    db.save_sort_settings(pid, False, "added_at", True, True)
+    assert run()["sorted"] == []
+
+
+def test_sort_page_api_and_uploads(env):
+    import io
+    _, write = env
+    pid = "U" * 22
+    write(backup_playlists=[pid])
+    from app import jobs
+    from app.scheduler import Scheduler
+    from app.web import create_app
+    items = [make_item("A" * 22, "Alpha", "X", "2021-01-01T00:00:00Z"),
+             make_item("B" * 22, "Bravo", "Y", "2025-01-01T00:00:00Z"),
+             make_item("C" * 22, "Charlie", "Z", "2023-01-01T00:00:00Z")]
+    jobs.run_job("t", sp_factory=lambda o: FakeSpotify({pid: {"name": "Up", "items": items}}))
+    s = Scheduler("0 3 * * *")
+    c = create_app(s).test_client()
+
+    assert "Sort: Up" in c.get(f"/playlist/{pid}/sort").get_data(as_text=True)
+    p = c.get(f"/api/playlist/{pid}/preview").json
+    assert p["settings"]["enabled"] == 0 and [r["name"] for r in p["rows"]] == ["Bravo", "Charlie", "Alpha"]
+
+    # Import an old export that shows Bravo was really added in 2020 -> it drops to the bottom.
+    old = "Position,Track,Album,Artist,Date Added,Track ID\n0,Bravo,Al,Y,2020-03-01T00:00:00Z,OLDID\n"
+    r = c.post(f"/playlist/{pid}/upload", data={"mode": "history", "file": (io.BytesIO(old.encode()), "old.csv")},
+               content_type="multipart/form-data")
+    assert "Imported%201%20dates" in r.headers["Location"]
+    p = c.get(f"/api/playlist/{pid}/preview").json
+    assert [r["name"] for r in p["rows"]] == ["Charlie", "Alpha", "Bravo"]
+    assert p["rows"][2]["date_source"] == "history"
+
+    # Override + pin through the API.
+    alpha = next(r for r in p["rows"] if r["name"] == "Alpha")
+    assert c.post(f"/api/playlist/{pid}/override", json={"position": alpha["position"], "track_id": "A" * 22,
+                                                          "date": "2030-01-01", "pin": ""}).status_code == 200
+    p = c.get(f"/api/playlist/{pid}/preview").json
+    assert p["rows"][0]["name"] == "Alpha" and p["rows"][0]["date_source"] == "override"
+    assert c.post(f"/api/playlist/{pid}/override", json={"position": alpha["position"], "track_id": "WRONG",
+                                                          "date": "2030-01-01"}).status_code == 409
+    oid = p["rows"][0]["override_id"]
+    c.post(f"/api/playlist/{pid}/override", json={"position": alpha["position"], "track_id": "A" * 22,
+                                                   "override_id": oid, "date": "", "pin": ""})
+    assert c.get(f"/api/playlist/{pid}/preview").json["rows"][0]["override_id"] is None  # cleared
+
+    # Custom order upload switches the sort mode and is followed in the preview.
+    order = "Track ID\n" + "C" * 22 + "\n" + "A" * 22 + "\n"
+    c.post(f"/playlist/{pid}/upload", data={"mode": "order", "file": (io.BytesIO(order.encode()), "o.csv")},
+           content_type="multipart/form-data")
+    p = c.get(f"/api/playlist/{pid}/preview").json
+    assert p["settings"]["sort_by"] == "custom" and [r["name"] for r in p["rows"]] == ["Charlie", "Alpha", "Bravo"]
+
+    # Settings + planned CSV + apply queues a single-playlist run.
+    assert c.post(f"/api/playlist/{pid}/settings", json={"enabled": True, "sort_by": "name", "reverse": False,
+                                                         "keep_original_dates": True}).status_code == 200
+    assert c.get(f"/playlist/{pid}/planned.csv").get_data(as_text=True).lstrip("﻿").splitlines()[1].split(",")[1] == "Alpha"
+    assert c.post(f"/api/playlist/{pid}/apply").json == {"queued": True}
+    assert s._pending == ("web-sort", pid)

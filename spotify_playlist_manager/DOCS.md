@@ -84,6 +84,10 @@ the ID starts with a short code instead of `local_`. Copy it from the add-on pag
 
 ### Sorting
 
+The easiest way to set up sorting is the **sort & overrides** page in the web UI (see
+[Sort & overrides](#sort--overrides) below). The `sort_playlists` option still works. If a
+playlist is set up in both places, the web UI settings win, including turning sorting off.
+
 * **`order_file`**: a CSV in `/share/spotify_backup/orders/` with a `Track ID` column. Your
   existing `Order.csv` and `Practice Order.csv` work as-is. Tracks missing from the file keep
   their relative order at the end of the playlist, so songs you add later are never lost.
@@ -103,6 +107,50 @@ the ID starts with a short code instead of `local_`. Copy it from the add-on pag
 
 The token is saved privately in the add-on and refreshes itself. Click **Run now** to test.
 
+## Sort & overrides
+
+Open the web UI and click **sort & overrides** next to a playlist (it must have been backed up
+at least once). You get a spreadsheet-style table of every track:
+
+| Column | Meaning |
+| --- | --- |
+| New # / Now # | Position after sorting / position on Spotify right now (green = will move) |
+| Added (Spotify) | The date Spotify reports |
+| Date used | The date the sort actually uses. **original** = re-added song, using its first date. **override** = your date |
+| Override date | Sort this song as if it was added on this day |
+| Pin | Keep this song at this exact position (1 = top), whatever the sort says |
+
+* Click any column heading to view the table in that order. This only changes the view, not
+  the playlist. Use the filter box to find songs.
+* Overrides and settings **save as soon as you change them**, and the New # column updates.
+* **Sort automatically on each scheduled run** keeps the playlist in this order every day.
+  **Apply to Spotify now** backs the playlist up and sorts it straight away.
+
+### Newest-first with re-added songs
+
+Choose **Sort by: Date added**, **Newest first**, and tick **Keep original dates for re-added
+songs**. When a song is replaced by a different track ID, the add-on still recognises it by:
+the old track ID, the same ISRC, or the same title and first artist. Titles are matched with
+suffixes like `- Remastered 2011`, `(feat. …)` or `- Single Version` ignored. The earliest
+date the song was ever in the playlist is used, so it stays in its old spot instead of jumping
+to the top.
+
+The add-on only knows the history it has backed up, which starts when you install it. To
+cover songs re-added before then, **upload an old export** with **Import original dates from
+an old export**. Your earlier `track_info.csv` style files work, and so do Exportify CSVs. For
+anything matching can't catch, set an **Override date**. Overrides follow the song, so they
+still apply if it's re-added again later.
+
+### Download / upload a CSV to sort by hand
+
+1. Click **Download planned order (CSV)**.
+2. Rearrange the rows in Excel or Google Sheets. Only the row order and the `Track ID` column
+   matter. Save as CSV.
+3. Under **Upload a CSV**, choose the file, pick **Use as custom order**, and click **Upload**.
+   Sort by switches to **Custom order**. Check the table, then click **Apply to Spotify now**.
+
+Songs missing from your file go to the end. Pins still apply on top of a custom order.
+
 ## 5. Get to your data
 
 All your data is in `/share/spotify_backup/` (the `share` folder over Samba):
@@ -111,7 +159,7 @@ All your data is in `/share/spotify_backup/` (the `share` folder over Samba):
 | --- | --- |
 | `playlists/<name>.csv` | Latest copy of each playlist |
 | `library.db` | SQLite. Every version of every playlist (a new version is saved only when it changed) |
-| `orders/` | Put your sort order CSVs here |
+| `orders/` | Order CSVs: for `order_file`, plus custom orders uploaded in the web UI (`<playlist id>.csv`) |
 
 From the web UI you can also download **everything as a .zip**, download the database, or
 download any past version of a playlist as a CSV.
