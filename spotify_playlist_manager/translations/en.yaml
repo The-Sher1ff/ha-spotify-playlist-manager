@@ -1,0 +1,39 @@
+configuration:
+  client_id:
+    name: Spotify client ID
+    description: From your app at developer.spotify.com/dashboard
+  client_secret:
+    name: Spotify client secret
+  redirect_uri:
+    name: Redirect URI
+    description: Must exactly match a Redirect URI on your Spotify app. The default works; you don't need to change it.
+  schedule:
+    name: Schedule (cron)
+    description: >-
+      When to run. "0 3 * * *" = daily at 3am, "0 3 * * 1" = Mondays at 3am,
+      "0 3 1 * *" = 1st of each month, "0 */6 * * *" = every 6 hours.
+  run_on_start:
+    name: Run when the add-on starts
+  backup_all_my_playlists:
+    name: Back up all my playlists
+    description: Every playlist you own or collaborate on. (Spotify doesn't let apps read other people's playlists.)
+  backup_liked_songs:
+    name: Back up Liked Songs
+  backup_playlists:
+    name: Playlists to back up
+    description: Playlist share links, spotify:playlist URIs or IDs. Use "liked" for Liked Songs.
+  sort_playlists:
+    name: Playlists to sort
+    description: >-
+      Each entry needs 'playlist' plus either 'order_file' (a CSV in the orders folder with a
+      'Track ID' column) or 'sort_by' (name, artist, album, added_at, release_date, duration).
+      Optional 'reverse: true'. Sorted playlists are always backed up first.
+  dry_run:
+    name: Dry run
+    description: Work out the sort moves and log them, without changing any playlist.
+  notify_on_failure:
+    name: Notify on failure
+    description: Create a Home Assistant notification when a run has errors.
+  data_dir:
+    name: Data folder
+    description: Where CSVs and the database are saved. Under /share so you can reach them over Samba.

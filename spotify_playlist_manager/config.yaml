@@ -1,0 +1,53 @@
+name: Spotify Playlist Manager
+version: "1.1.0"
+slug: spotify_playlist_manager
+description: Scheduled backup (CSV + SQLite) and re-ordering of Spotify playlists
+url: https://github.com/The-Sher1ff/ha-spotify-playlist-manager
+arch:
+  - aarch64
+  - amd64
+init: false
+startup: application
+boot: auto
+stdin: true
+homeassistant_api: true
+ingress: true
+ingress_port: 8099
+# Supervisor polls this; if it stops answering 200, the add-on is restarted.
+watchdog: "http://[HOST]:[PORT:8099]/health"
+panel_icon: mdi:spotify
+panel_title: Spotify Backup
+map:
+  - type: share
+    read_only: false
+options:
+  client_id: ""
+  client_secret: ""
+  redirect_uri: "http://127.0.0.1:8888/callback"
+  schedule: "0 3 * * *"
+  run_on_start: false
+  backup_all_my_playlists: false
+  backup_liked_songs: false
+  backup_playlists: []
+  sort_playlists: []
+  dry_run: false
+  notify_on_failure: true
+  data_dir: /share/spotify_backup
+schema:
+  client_id: str
+  client_secret: password
+  redirect_uri: url
+  schedule: str
+  run_on_start: bool
+  backup_all_my_playlists: bool
+  backup_liked_songs: bool
+  backup_playlists:
+    - str
+  sort_playlists:
+    - playlist: str
+      order_file: str?
+      sort_by: list(name|artist|album|added_at|release_date|duration)?
+      reverse: bool?
+  dry_run: bool
+  notify_on_failure: bool
+  data_dir: str
